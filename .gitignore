@@ -1,0 +1,5 @@
+assets/
+.ipynb_checkpoints
+.idea
+weights/
+venv/
