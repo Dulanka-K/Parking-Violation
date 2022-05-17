@@ -9,7 +9,7 @@ from hough_bundler import *
 
 tracker = EuclideanDistTracker()
 dirIdentifier = DirectionIdentifier()
-bundler = HoughBundler(min_distance=10, min_angle=5)
+bundler = HoughBundler(min_distance=20, min_angle=5)
 
 # Load Yolo
 net = cv2.dnn.readNet("../weights/yolov3.weights", "../weights/yolov3.cfg")
@@ -44,8 +44,21 @@ upcontour = np.zeros((init_height, init_width, 3), np.uint8)
 downcontour = np.zeros((init_height, init_width, 3), np.uint8)
 upROI = np.zeros((init_height, init_width, 3), np.uint8)
 downROI = np.zeros((init_height, init_width, 3), np.uint8)
+up_illegal_mask = np.zeros((init_height, init_width, 3), np.uint8)
+down_illegal_mask = np.zeros((init_height, init_width, 3), np.uint8)
+
+upline_arr = []
+downline_arr = []
 dlines = []
 ulines = []
+
+up_angles = []
+down_angles = []
+up_stopline = None
+down_stopline = None
+
+approach_length = 300
+departure_length = 200
 
 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
@@ -58,6 +71,11 @@ floodflags |= (255 << 8)
 
 cap.set(cv2.CAP_PROP_POS_FRAMES, 530)
 
+# width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+# height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# fps = int(cap.get(cv2.CAP_PROP_FPS))
+# outv = cv2.VideoWriter('output2.avi', cv2.VideoWriter_fourcc('M','J','P','G'), fps, (width, height))
+
 def closestPoint(p1, p2, p3):
     [x1, y1] = p1
     [x2, y2] = p2
@@ -67,15 +85,42 @@ def closestPoint(p1, p2, p3):
     a = (dy*(y3-y1)+dx*(x3-x1))/det
     return [x1+a*dx, y1+a*dy]
 
+def slope(x1,y1,x2,y2):
+    if x2 != x1:
+        return((y2 - y1) / (x2 - x1))
+    else:
+        return 'NA'
+
+def getMask(direction, image, x1, y1, x2, y2):
+    m = slope(x1, y1, x2, y2)
+    h, w = image.shape[:2]
+    if m != 'NA':
+        px = 0
+        py = -(x1-0)*m+y1
+        qx = w
+        qy = -(x2-w)*m+y2
+    else:
+        px, py = x1, 0
+        qx, qy = x1, h
+    # cv2.line(image, (int(px), int(py)), (int(qx), int(qy)), (0, 255, 0), 2)
+    # cv2.line(image, (int(px), int(py + 200)), (int(qx), int(qy + 200)), (0, 255, 0), 2)
+    if direction == 'up':
+        poly = np.array([[int(px), int(py - departure_length)], [int(qx), int(qy - departure_length)], [int(qx), int(qy + approach_length)], [int(px), int(py + approach_length)]])
+        return poly
+    if direction == 'down':
+        poly = np.array(
+            [[int(px), int(py - approach_length)], [int(qx), int(qy - approach_length)], [int(qx), int(qy + departure_length)], [int(px), int(py + departure_length)]])
+        return poly
+
 while True:
     start = time.time()
     _, img = cap.read()
+
     frame_cnt += 1
     height, width, channels = img.shape
 
     # Loading image
     # img = cv2.imread("../assets/dog.jpg")
-    # img = cv2.resize(img, None, fx=0.4, fy=0.4)
 
     if frame_cnt < dir_detect_frame:
         blur = cv2.GaussianBlur(img, (3, 3), 0)
@@ -177,7 +222,7 @@ while True:
             # cv2.putText(img, label + " " + str(id) + " " + direction, (x, y - 8), font, 1, (255, 255, 255), 2)
 
     if frame_cnt == dir_detect_frame:
-        img_copy = img.copy()
+
         # updilated = cv2.dilate(upmask, kernel)
         # downdilated = cv2.dilate(downmask, kernel)
 
@@ -189,26 +234,16 @@ while True:
             # upcontour = cv2.polylines(upcontour, [sorted_up[0]], True, (255, 255, 255), 2)
             updetected = True
             uphull = cv2.convexHull(sorted_up[0])
-            cv2.drawContours(upcontour, [uphull], -1, (255, 255, 255), 4)
+            # cv2.drawContours(upcontour, [uphull], -1, (255, 255, 255), 4)
             upcontour = cv2.fillPoly(upcontour, [uphull], (255, 255, 255))
-            upROI = cv2.bitwise_and(upcontour, img_copy)
-            uplines = get_lane_line_cordinates(upROI)
-            if uplines is not None:
-                ulines = bundler.process_lines(uplines)
-                print(ulines)
 
         sorted_down = sorted(downcontours, key=cv2.contourArea, reverse=True)
         if sorted_down:
             # downcontour = cv2.polylines(downcontour, [sorted_down[0]], True, (255, 255, 255), 2)
             downdetected = True
             downhull = cv2.convexHull(sorted_down[0])
-            cv2.drawContours(downcontour, [downhull], -1, (255, 255, 255), 4)
+            # cv2.drawContours(downcontour, [downhull], -1, (255, 255, 255), 4)
             downcontour = cv2.fillPoly(downcontour, [downhull], (255, 255, 255))
-            downROI = cv2.bitwise_and(downcontour, img_copy)
-            downlines = get_lane_line_cordinates(downROI)
-            if downlines is not None:
-                dlines = bundler.process_lines(downlines)
-                print(dlines)
 
         nearest_up = {} #color lights nearest to up and down directions
         nearest_down = {}
@@ -237,49 +272,116 @@ while True:
                 else:
                     nearest_down[i] = dist_frm_down
 
-    elif frame_cnt > dir_detect_frame:
+    if (frame_cnt > dir_detect_frame) & (frame_cnt < dir_detect_frame + 20):
+        img_copy = img.copy()
+        if updetected:
+            upROI = cv2.bitwise_and(upcontour, img_copy)
+            uplines = get_lane_line_cordinates(upROI)
+            if uplines is not None:
+                if len(upline_arr) != 0:
+                    upline_arr = np.concatenate((upline_arr, uplines), axis=0)
+                else:
+                    upline_arr = uplines
+
+        if downdetected:
+            downROI = cv2.bitwise_and(downcontour, img_copy)
+            downlines = get_lane_line_cordinates(downROI)
+            if downlines is not None:
+                if len(downline_arr) != 0:
+                    downline_arr = np.concatenate((downline_arr, downlines), axis=0)
+                else:
+                    downline_arr = downlines
+
+    if frame_cnt == dir_detect_frame + 20:
+        if len(upline_arr) != 0:
+            ulines = bundler.process_lines(upline_arr)
+            if ulines is not None:
+                for line in ulines:
+                    x1, y1, x2, y2 = line[0]
+                    [x, y] = closestPoint([x1, y1], [x2, y2], [0, 0])
+                    angle = math.atan2(y, x)
+                    up_angles.append(angle)
+
+                up_stoplines = [i for i in up_angles if i >= 1.5] # 1.5rad = 85 degrees
+                if up_stoplines:
+                    up_stopl_id = up_angles.index(up_stoplines[0])
+                    up_stopline = ulines[up_stopl_id][0]
+
+        if len(downline_arr) != 0:
+            dlines = bundler.process_lines(downline_arr)
+            if dlines is not None:
+                for line in dlines:
+                    x1, y1, x2, y2 = line[0]
+                    [x, y] = closestPoint([x1, y1], [x2, y2], [0, 0])
+                    angle = math.atan2(y, x) #angle from origin and closest point of a line (perpendicular)
+                    down_angles.append(angle)
+
+                down_stoplines = [i for i in down_angles if i >= 1.5]
+                if down_stoplines:
+                    down_stopl_id = down_angles.index(down_stoplines[0])
+                    down_stopline = dlines[down_stopl_id][0]
+
+
+    if frame_cnt > dir_detect_frame + 20:
         # img_copy = img.copy()
         if updetected:
-            img = cv2.addWeighted(src1=img, alpha=1, src2=upcontour, beta=0.3, gamma=0)
-            up_id = next(iter(nearest_up))
-            x, y, w, h = clrlight_boxes[up_id]
-            cv2.putText(img, "up_lt", (x, y - 8), font, 1, (255, 255, 255), 2)
-            cx = (x + x + w) // 2
-            cy = (y + y + h) // 2
-            cv2.circle(img, [int(cx), int(cy)], 2, (0, 255, 255), -1)
-            for centerpoints in upcenters:
-                [x, y] = closestPoint(centerpoints[0], centerpoints[-1], [cx, cy])
-                cv2.circle(img, [int(x), int(y)], 2, (0, 0, 255), -1)
-                cv2.line(img, centerpoints[0], centerpoints[-1], (255, 0, 0), 2)
+            # img = cv2.addWeighted(src1=img, alpha=1, src2=upcontour, beta=0.3, gamma=0)
+            if bool(nearest_up):
+                up_id = next(iter(nearest_up))
+                x, y, w, h = clrlight_boxes[up_id]
+                cv2.putText(img, "up_lt", (x, y - 8), font, 1, (255, 255, 255), 2)
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # cx = (x + x + w) // 2
+                # cy = (y + y + h) // 2
+                # cv2.circle(img, [int(cx), int(cy)], 2, (0, 255, 255), -1)
+                # for centerpoints in upcenters:
+                #     [x, y] = closestPoint(centerpoints[0], centerpoints[-1], [cx, cy])
+                #     cv2.circle(img, [int(x), int(y)], 2, (0, 0, 255), -1)
+                #     cv2.line(img, centerpoints[0], centerpoints[-1], (255, 0, 0), 2)
             # add line detection here
             if ulines is not None:
                 for line in ulines:
                     # print(len(lines))
                     x1, y1, x2, y2 = line[0]
                     cv2.line(upROI, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.circle(upROI, [x1, y1], 2, (0, 255, 255), -1)
-                    cv2.circle(upROI, [x2, y2], 2, (0, 255, 255), -1)
+
+            if up_stopline is not None:
+                x1, y1, x2, y2 = up_stopline
+                cv2.line(upROI, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                poly = getMask('up', upROI, x1, y1, x2, y2)
+                up_illegal_mask = cv2.fillPoly(up_illegal_mask, [poly], (0, 0, 255))
+                up_illegal_mask = cv2.bitwise_and(upcontour, up_illegal_mask)
+                img = cv2.addWeighted(src1=img, alpha=1, src2=up_illegal_mask, beta=0.3, gamma=0)
+
 
         if downdetected:
-            img = cv2.addWeighted(src1=img, alpha=1, src2=downcontour, beta=0.3, gamma=0)
-            down_id = next(iter(nearest_down))
-            x, y, w, h = clrlight_boxes[down_id]
-            cv2.putText(img, "down_lt", (x, y - 8), font, 1, (255, 255, 255), 2)
-            cx = (x + x + w) // 2
-            cy = (y + y + h) // 2
-            cv2.circle(img, [int(cx), int(cy)], 2, (0, 255, 255), -1)
-            for centerpoints in downcenters:
-                [x, y] = closestPoint(centerpoints[-1], centerpoints[0], [cx, cy])
-                cv2.circle(img, [int(x), int(y)], 2, (0, 0, 255), -1)
-                cv2.line(img, centerpoints[0], centerpoints[-1], (255, 0, 0), 2)
+            # img = cv2.addWeighted(src1=img, alpha=1, src2=downcontour, beta=0.3, gamma=0)
+            if bool(nearest_down):
+                down_id = next(iter(nearest_down))
+                x, y, w, h = clrlight_boxes[down_id]
+                cv2.putText(img, "down_lt", (x, y - 8), font, 1, (255, 255, 255), 2)
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # cx = (x + x + w) // 2
+                # cy = (y + y + h) // 2
+                # cv2.circle(img, [int(cx), int(cy)], 2, (0, 255, 255), -1)
+                # for centerpoints in downcenters:
+                #     [x, y] = closestPoint(centerpoints[-1], centerpoints[0], [cx, cy])
+                #     cv2.circle(img, [int(x), int(y)], 2, (0, 0, 255), -1)
+                #     cv2.line(img, centerpoints[0], centerpoints[-1], (255, 0, 0), 2)
             # add line detection here
             if dlines is not None:
                 for line in dlines:
                     # print(len(lines))
                     x1, y1, x2, y2 = line[0]
                     cv2.line(downROI, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.circle(downROI, [x1, y1], 2, (0, 255, 255), -1)
-                    cv2.circle(downROI, [x2, y2], 2, (0, 255, 255), -1)
+
+            if down_stopline is not None:
+                x1, y1, x2, y2 = down_stopline
+                cv2.line(downROI, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                poly = getMask('down', downROI, x1, y1, x2, y2)
+                down_illegal_mask = cv2.fillPoly(down_illegal_mask, [poly], (0, 0, 255))
+                down_illegal_mask = cv2.bitwise_and(downcontour, down_illegal_mask)
+                img = cv2.addWeighted(src1=img, alpha=1, src2=down_illegal_mask, beta=0.3, gamma=0)
 
         cv2.imshow("Up ROI", upROI)
         cv2.imshow("Down ROI", downROI)
@@ -287,11 +389,15 @@ while True:
     cv2.putText(img, "Frame: " + str(frame_cnt), (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
     end = time.time()
-    fps = 1 / (end - start)
-
-    cv2.putText(img, f"{fps:.2f} FPS", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # fps = 1 / (end - start)
+    #
+    # cv2.putText(img, f"{fps:.2f} FPS", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # outv.write(img)
+    # img = cv2.resize(img, None, fx=0.4, fy=0.4)
     cv2.imshow("Image", img)
     # cv2.imshow("Blur", blur)
+    # umask = cv2.resize(upmask, (768, 432))
+    # dmask = cv2.resize(downmask, (768, 432))
     # cv2.imshow("Up Mask", upmask)
     # cv2.imshow("Down Mask", downmask)
     # cv2.imshow("Up Contour", upcontour)
